@@ -63,11 +63,13 @@ export default function AccountProfile({
   onBack,
   onDelete,
   onRename,
+  onRefresh,
 }: {
   account: AccountStatus | undefined;
   onBack: () => void;
   onDelete: (id: string) => void;
   onRename: (newId: string) => void;
+  onRefresh?: () => void;
 }) {
   const [settings, setSettings] = useState<BotSettings>(defaultSettings);
   const [isSaving, setIsSaving] = useState(false);
@@ -121,6 +123,7 @@ export default function AccountProfile({
       if (r.ok) {
         const updated = await r.json().catch(() => newSetting);
         setSettings(updated);
+        onRefresh?.();
       } else {
         const d = await r.json().catch(() => ({}));
         setSaveError(d?.error || "Gagal menyimpan pengaturan");
@@ -207,8 +210,8 @@ export default function AccountProfile({
     setKw(""); setRes("");
   };
 
-  const removeResponse = (keyword: string) =>
-    saveSetting({ ...settings, responses: (settings.responses || []).filter((r) => r.keyword !== keyword) });
+  const removeResponse = (index: number) =>
+    saveSetting({ ...settings, responses: (settings.responses || []).filter((_, i) => i !== index) });
 
   if (!account) {
     return (
@@ -453,7 +456,7 @@ export default function AccountProfile({
               <input
                 value={kw}
                 onChange={(e) => setKw(e.target.value)}
-                placeholder="Keyword (contoh: wtb, jual, roblox)"
+                placeholder="Keyword — pisahkan dengan koma: wtb, jual, roblox"
                 className="w-full h-9 border border-line rounded-xl px-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition placeholder:text-slate-300 bg-card text-primary"
               />
               <textarea
@@ -472,13 +475,13 @@ export default function AccountProfile({
               </button>
 
               <div className="space-y-2 max-h-[260px] overflow-y-auto mt-1">
-                {(settings.responses || []).map((r) => (
-                  <div key={r.keyword} className="flex items-start justify-between gap-2 p-3 bg-hover border border-line rounded-xl">
+                {(settings.responses || []).map((r, i) => (
+                  <div key={i} className="flex items-start justify-between gap-2 p-3 bg-hover border border-line rounded-xl">
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-bold text-primary mb-0.5">"{r.keyword}"</p>
                       <p className="text-xs text-secondary line-clamp-2 leading-relaxed">{r.response}</p>
                     </div>
-                    <button onClick={() => removeResponse(r.keyword)} disabled={isSaving} className="text-slate-400 hover:text-rose-500 transition shrink-0 disabled:opacity-50">
+                    <button onClick={() => removeResponse(i)} disabled={isSaving} className="text-slate-400 hover:text-rose-500 transition shrink-0 disabled:opacity-50">
                       <Trash2 size={12} />
                     </button>
                   </div>

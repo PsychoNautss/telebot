@@ -43,7 +43,7 @@ const defaultSettings: BotSettings = {
   autoDetect: false,
   targetGroups: [],
   responses: [],
-  antiSpamDelay: 2000,
+  antiSpamDelay: 5000,
 };
 
 const sanitizeSettings = (input: Partial<BotSettings> | null | undefined): BotSettings => {
@@ -194,18 +194,16 @@ const normalizeForKeyword = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
-const containsKeyword = (rawText: string, keyword: string) => {
-  const k = (keyword || "").toLowerCase().trim();
+const matchesSingleKeyword = (rawText: string, singleKeyword: string): boolean => {
+  const k = singleKeyword.toLowerCase().trim();
   if (!k) return false;
 
   const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-  // Exact word boundary match on raw text
   try {
     if (new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, "i").test(rawText)) return true;
   } catch {}
 
-  // Word boundary match on normalized text (handles accents / special chars)
   const nt = normalizeForKeyword(rawText);
   const nk = normalizeForKeyword(k);
   if (!nk) return false;
@@ -214,6 +212,15 @@ const containsKeyword = (rawText: string, keyword: string) => {
     return new RegExp(`(?<![a-z0-9])${nEscaped}(?![a-z0-9])`).test(nt);
   } catch {}
 
+  return false;
+};
+
+// Supports comma-separated keywords: "wtb, jual, roblox" matches any of the three
+const containsKeyword = (rawText: string, keyword: string): string | false => {
+  const parts = (keyword || "").split(",").map((p) => p.trim()).filter(Boolean);
+  for (const part of parts) {
+    if (matchesSingleKeyword(rawText, part)) return part;
+  }
   return false;
 };
 
@@ -448,7 +455,24 @@ const handleIncomingMessage = async (
   const isFwd = Boolean((message as any)?.fwdFrom || (message as any)?.forward);
   const hasThread = Boolean(replyMeta?.replyToTopId || replyMeta?.replyToMsgId);
   const sourceClass = String(chat?.className || "");
-  if (sourceClass !== "Channel" && !hasThread && !isFwd) return;
+  const fwdChannelPostIdEarly = Number((message as any)?.fwdFrom?.channelPost || 0);
+  const isBroadcastChannel = Boolean((chat as any)?.broadcast);
+  // peer.channelId is set for both broadcast channels AND megagroups — reliable even when chat=null
+  const isChannelPeer = Boolean(peer?.channelId);
+
+  if (!isBroadcastChannel && !isChannelPeer) {
+    // Not from any channel peer — skip unless forwarded from a channel
+    if (sourceClass !== "Channel" && !fwdChannelPostIdEarly && !isFwd) {
+      broadcastLog(`[${accountId}] [SKIP] Bukan channel, class="${sourceClass}"`, "info");
+      return;
+    }
+  }
+
+  // Skip replies/comments in discussion megagroup (not forwarded channel posts)
+  if (!isBroadcastChannel && isChannelPeer && chat?.megagroup && hasThread && !fwdChannelPostIdEarly) {
+    broadcastLog(`[${accountId}] [SKIP] Komentar discussion group diabaikan`, "info");
+    return;
+  }
 
   // When a channel post is forwarded into a linked discussion group, Telegram sets
   // replyMeta.replyToTopId to the CHANNEL message ID — which is NOT a valid message ID
@@ -471,7 +495,10 @@ const handleIncomingMessage = async (
   const canonicalPeerId = fwdChannelId || String(peer?.channelId || peer?.chatId || peer?.userId || "unknown");
   const canonicalMsgId = fwdChannelPostId || Number(message?.id || 0);
   const dedupeKey = `${accountId}:${canonicalPeerId}:${canonicalMsgId}`;
-  if (processedMessageKeys.has(dedupeKey)) return;
+  if (processedMessageKeys.has(dedupeKey)) {
+    broadcastLog(`[${accountId}] [DEDUP] Sudah diproses: ${dedupeKey}`, "info");
+    return;
+  }
   processedMessageKeys.add(dedupeKey);
   if (processedMessageKeys.size > 5000) processedMessageKeys.clear();
 
@@ -486,20 +513,23 @@ const handleIncomingMessage = async (
     ];
     const compactIds = Array.from(new Set(possibleIds.map(normalizeTarget)))
       .slice(0, 8)
-      .join(", ");
-    if (compactIds) {
-      broadcastLog(
-        `[${accountId}] [SKIP] Target tidak cocok. Kandidat: ${compactIds}`,
-        "info"
-      );
-    }
+      .join(", ") || "(kosong)";
+    broadcastLog(
+      `[${accountId}] [SKIP] Target tidak cocok. Kandidat: ${compactIds}`,
+      "info"
+    );
     return;
   }
 
   const msgText = rawText.toLowerCase();
   const normalizedMsgText = normalizeForKeyword(rawText);
 
-  const match = settings.responses.find((r) => containsKeyword(msgText, r.keyword));
+  let detectedKeyword = "";
+  const match = settings.responses.find((r) => {
+    const hit = containsKeyword(msgText, r.keyword);
+    if (hit) { detectedKeyword = String(hit); return true; }
+    return false;
+  });
 
   if (!match) {
     broadcastLog(
@@ -508,8 +538,6 @@ const handleIncomingMessage = async (
     );
     return;
   }
-
-  const detectedKeyword = match.keyword;
 
   // Use the same canonical IDs as dedupeKey so event-path and poll-path
   // for the same channel post share one threadKey and only one reply is sent.
@@ -520,7 +548,7 @@ const handleIncomingMessage = async (
   if (repliedThreadKeys.size > 10000) repliedThreadKeys.clear();
 
   broadcastLog(
-    `[${accountId}] [TRIGGER] Keyword terdeteksi (${source}): "${detectedKeyword}"`,
+    `[${accountId}] [TRIGGER][${source}] keyword="${detectedKeyword}" | teks="${rawText.slice(0, 100)}"`,
     "bot"
   );
 
@@ -559,6 +587,12 @@ const handleIncomingMessage = async (
     } else {
       replyTarget = await resolveReplyTarget(message, chat);
     }
+
+    const minDelay = 3000;
+    const maxDelay = 8000;
+    const randomDelay = minDelay + Math.floor(Math.random() * (maxDelay - minDelay));
+    broadcastLog(`[${accountId}] Menunggu ${(randomDelay / 1000).toFixed(1)}s sebelum reply...`, "info");
+    await new Promise((r) => setTimeout(r, randomDelay));
 
     addToQueue(accountId, replyTarget, replyMsgId, finalResponse);
   } catch (err: any) {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
   Terminal,
@@ -32,11 +33,12 @@ interface AccountStatus {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"dash" | "logs" | "settings">("dash");
+  const navigate = useNavigate();
+  const location = useLocation();
+
   const [isConnected, setIsConnected] = useState(false);
   const [accounts, setAccounts] = useState<AccountStatus[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
 
   // Auth form state
@@ -61,6 +63,20 @@ export default function App() {
   );
 
   const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Derive current page from URL
+  const accountMatch = location.pathname.match(/^\/account\/(.+)$/);
+  const selectedAccountId = accountMatch
+    ? decodeURIComponent(accountMatch[1])
+    : null;
+
+  const activePage = selectedAccountId
+    ? "account"
+    : location.pathname === "/logs"
+    ? "logs"
+    : location.pathname === "/settings"
+    ? "settings"
+    : "dash";
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -95,8 +111,12 @@ export default function App() {
         return [log, ...prev].slice(0, 100);
       });
     });
+
+    const refreshInterval = setInterval(loadConfig, 5000);
+
     return () => {
       socket.disconnect();
+      clearInterval(refreshInterval);
     };
   }, []);
 
@@ -180,27 +200,13 @@ export default function App() {
     return <LoginPage onLogin={() => setIsAuthed(true)} />;
   }
 
-  return (
-    <>
-      {/* Account Profile — fixed overlay, independent of main layout re-renders */}
-      {selectedAccountId && (
-        <div className="fixed inset-0 z-50 overflow-y-auto bg-main">
-          <AccountProfile
-            key={selectedAccountId}
-            account={accounts.find((a) => a.accountId === selectedAccountId)}
-            onBack={() => setSelectedAccountId(null)}
-            onDelete={(id) => {
-              removeAccount(id);
-              setSelectedAccountId(null);
-            }}
-            onRename={(newId) => {
-              setSelectedAccountId(newId);
-              loadConfig();
-            }}
-          />
-        </div>
-      )}
+  const navItems = [
+    { page: "dash", path: "/", icon: <LayoutDashboard size={17} />, label: "Dashboard" },
+    { page: "logs", path: "/logs", icon: <Terminal size={17} />, label: "Logs" },
+    { page: "settings", path: "/settings", icon: <Settings size={17} />, label: "Settings" },
+  ] as const;
 
+  return (
     <div className="min-h-screen bg-main flex">
       {/* Sidebar */}
       <aside className="w-[60px] bg-[#1C1F2E] flex flex-col items-center py-5 gap-1 fixed left-0 top-0 h-full z-40">
@@ -208,19 +214,13 @@ export default function App() {
           <Zap className="w-[18px] h-[18px] text-white fill-current" />
         </div>
 
-        {(
-          [
-            { tab: "dash", icon: <LayoutDashboard size={17} />, label: "Dashboard" },
-            { tab: "logs", icon: <Terminal size={17} />, label: "Logs" },
-            { tab: "settings", icon: <Settings size={17} />, label: "Settings" },
-          ] as const
-        ).map(({ tab, icon, label }) => (
+        {navItems.map(({ page, path, icon, label }) => (
           <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
+            key={page}
+            onClick={() => navigate(path)}
             title={label}
             className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${
-              activeTab === tab
+              activePage === page || (page === "settings" && activePage === "account")
                 ? "bg-indigo-500 text-white"
                 : "text-slate-500 hover:text-slate-300 hover:bg-white/5"
             }`}
@@ -255,179 +255,220 @@ export default function App() {
 
       {/* Main Content */}
       <main className="ml-[60px] flex-1 min-h-screen">
-        <div className="max-w-5xl mx-auto p-7">
+        <AnimatePresence mode="wait">
+          {/* ── ACCOUNT PROFILE PAGE ── */}
+          {activePage === "account" && selectedAccountId && (
+            <motion.div
+              key="account"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+              transition={{ duration: 0.18 }}
+            >
+              <AccountProfile
+                key={selectedAccountId}
+                account={accounts.find((a) => a.accountId === selectedAccountId)}
+                onBack={() => navigate(-1)}
+                onDelete={(id) => {
+                  removeAccount(id);
+                  navigate("/");
+                }}
+                onRename={(newId) => {
+                  navigate(`/account/${encodeURIComponent(newId)}`);
+                  loadConfig();
+                }}
+                onRefresh={loadConfig}
+              />
+            </motion.div>
+          )}
+
           {/* ── DASHBOARD ── */}
-          {activeTab === "dash" && (
-            <div className="space-y-7">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h1 className="text-xl font-bold text-slate-900">Dashboard</h1>
-                  <p className="text-sm text-slate-500 mt-0.5">
-                    {connectedCount} dari {accounts.length} akun terhubung
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    resetForm();
-                    setShowAddForm(true);
-                  }}
-                  className="flex items-center gap-2 px-4 py-2 bg-indigo-500 text-white text-sm font-semibold rounded-xl hover:bg-indigo-600 transition shadow-sm shadow-indigo-200"
-                >
-                  <Plus size={15} />
-                  Tambah Akun
-                </button>
-              </div>
-
-              {/* Stats */}
-              <div className="grid grid-cols-3 gap-4">
-                <StatCard
-                  icon={<Users size={17} />}
-                  label="Total Akun"
-                  value={accounts.length}
-                  accent="indigo"
-                />
-                <StatCard
-                  icon={<Activity size={17} />}
-                  label="Terhubung"
-                  value={connectedCount}
-                  accent="emerald"
-                />
-                <StatCard
-                  icon={<MessageSquare size={17} />}
-                  label="Log Masuk"
-                  value={logs.length}
-                  accent="violet"
-                />
-              </div>
-
-              {/* Account list */}
-              {accounts.length > 0 ? (
-                <div>
-                  <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
-                    Akun Anda
-                  </h2>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {accounts.map((acc) => (
-                      <AccountCard
-                        key={acc.accountId}
-                        account={acc}
-                        onClick={() => setSelectedAccountId(acc.accountId)}
-                      />
-                    ))}
+          {activePage === "dash" && (
+            <motion.div
+              key="dash"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              transition={{ duration: 0.18 }}
+              className="max-w-5xl mx-auto p-7"
+            >
+              <div className="space-y-7">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h1 className="text-xl font-bold text-slate-900">Dashboard</h1>
+                    <p className="text-sm text-slate-500 mt-0.5">
+                      {connectedCount} dari {accounts.length} akun terhubung
+                    </p>
                   </div>
+                  <button
+                    onClick={() => {
+                      resetForm();
+                      setShowAddForm(true);
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 bg-indigo-500 text-white text-sm font-semibold rounded-xl hover:bg-indigo-600 transition shadow-sm shadow-indigo-200"
+                  >
+                    <Plus size={15} />
+                    Tambah Akun
+                  </button>
                 </div>
-              ) : (
-                <EmptyState
-                  onAdd={() => {
-                    resetForm();
-                    setShowAddForm(true);
-                  }}
-                />
-              )}
-            </div>
+
+                {/* Stats */}
+                <div className="grid grid-cols-3 gap-4">
+                  <StatCard icon={<Users size={17} />} label="Total Akun" value={accounts.length} accent="indigo" />
+                  <StatCard icon={<Activity size={17} />} label="Terhubung" value={connectedCount} accent="emerald" />
+                  <StatCard icon={<MessageSquare size={17} />} label="Log Masuk" value={logs.length} accent="violet" />
+                </div>
+
+                {/* Account list */}
+                {accounts.length > 0 ? (
+                  <div>
+                    <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
+                      Akun Anda
+                    </h2>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {accounts.map((acc) => (
+                        <AccountCard
+                          key={acc.accountId}
+                          account={acc}
+                          onClick={() => navigate(`/account/${encodeURIComponent(acc.accountId)}`)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <EmptyState onAdd={() => { resetForm(); setShowAddForm(true); }} />
+                )}
+              </div>
+
+              <footer className="pt-10 pb-5">
+                <p className="text-[11px] text-slate-400 text-center">
+                  © {new Date().getFullYear()} raditdev
+                </p>
+              </footer>
+            </motion.div>
           )}
 
           {/* ── LOGS ── */}
-          {activeTab === "logs" && (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h1 className="text-xl font-bold text-slate-900">Console</h1>
-                <button
-                  onClick={() => setLogs([])}
-                  className="text-xs font-medium text-slate-400 hover:text-slate-600 transition"
-                >
-                  Clear
-                </button>
-              </div>
-              <div className="bg-[#0D1117] rounded-2xl overflow-hidden">
-                <div className="flex items-center gap-1.5 px-4 py-3 border-b border-white/5">
-                  <div className="w-2.5 h-2.5 rounded-full bg-rose-500/70" />
-                  <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/70" />
-                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/70" />
-                  <span className="ml-2 text-[10px] text-slate-600 font-mono">teleoffer — log</span>
+          {activePage === "logs" && (
+            <motion.div
+              key="logs"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              transition={{ duration: 0.18 }}
+              className="max-w-5xl mx-auto p-7"
+            >
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h1 className="text-xl font-bold text-slate-900">Console</h1>
+                  <button
+                    onClick={() => setLogs([])}
+                    className="text-xs font-medium text-slate-400 hover:text-slate-600 transition"
+                  >
+                    Clear
+                  </button>
                 </div>
-                <div className="h-[580px] overflow-y-auto p-4 font-mono text-[11px] space-y-1 scrollbar-thin scrollbar-thumb-white/10">
-                  {logs.map((l, i) => (
-                    <div key={i} className="flex gap-3">
-                      <span className="text-slate-600 shrink-0 select-none">{l.timestamp}</span>
-                      <span
-                        className={
-                          l.type === "success"
-                            ? "text-emerald-400"
-                            : l.type === "error"
-                            ? "text-rose-400"
-                            : l.type === "bot"
-                            ? "text-indigo-400 font-semibold"
-                            : "text-slate-400"
-                        }
-                      >
-                        {l.message}
-                      </span>
-                    </div>
-                  ))}
-                  {logs.length === 0 && (
-                    <p className="text-slate-700 text-center pt-10 italic">
-                      Console kosong...
-                    </p>
-                  )}
-                  <div ref={logsEndRef} />
+                <div className="bg-[#0D1117] rounded-2xl overflow-hidden">
+                  <div className="flex items-center gap-1.5 px-4 py-3 border-b border-white/5">
+                    <div className="w-2.5 h-2.5 rounded-full bg-rose-500/70" />
+                    <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/70" />
+                    <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/70" />
+                    <span className="ml-2 text-[10px] text-slate-600 font-mono">teleoffer — log</span>
+                  </div>
+                  <div className="h-[580px] overflow-y-auto p-4 font-mono text-[11px] space-y-1 scrollbar-thin scrollbar-thumb-white/10">
+                    {logs.map((l, i) => (
+                      <div key={i} className="flex gap-3">
+                        <span className="text-slate-600 shrink-0 select-none">{l.timestamp}</span>
+                        <span
+                          className={
+                            l.type === "success"
+                              ? "text-emerald-400"
+                              : l.type === "error"
+                              ? "text-rose-400"
+                              : l.type === "bot"
+                              ? "text-indigo-400 font-semibold"
+                              : "text-slate-400"
+                          }
+                        >
+                          {l.message}
+                        </span>
+                      </div>
+                    ))}
+                    {logs.length === 0 && (
+                      <p className="text-slate-700 text-center pt-10 italic">Console kosong...</p>
+                    )}
+                    <div ref={logsEndRef} />
+                  </div>
                 </div>
               </div>
-            </div>
+
+              <footer className="pt-6 pb-5">
+                <p className="text-[11px] text-slate-400 text-center">
+                  © {new Date().getFullYear()} raditdev
+                </p>
+              </footer>
+            </motion.div>
           )}
 
           {/* ── SETTINGS ── */}
-          {activeTab === "settings" && (
-            <div className="space-y-5 max-w-md">
-              <h1 className="text-xl font-bold text-slate-900">Pengaturan</h1>
-              {accounts.length === 0 ? (
-                <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center">
-                  <p className="text-sm text-slate-400">Belum ada akun tersimpan.</p>
-                </div>
-              ) : (
-                <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden divide-y divide-slate-100">
-                  {accounts.map((acc) => (
-                    <button
-                      key={acc.accountId}
-                      onClick={() => setSelectedAccountId(acc.accountId)}
-                      className="w-full flex items-center gap-3 px-5 py-4 hover:bg-slate-50 transition text-left"
-                    >
-                      <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center text-slate-600 font-bold text-sm shrink-0">
-                        {acc.accountId.charAt(0).toUpperCase()}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold text-slate-800 truncate">
-                          {acc.accountId}
-                        </p>
-                        <div className="flex items-center gap-2.5 mt-0.5 flex-wrap">
-                          <div className="flex items-center gap-1.5">
-                            <div className={`w-1.5 h-1.5 rounded-full ${acc.connected ? "bg-emerald-500" : "bg-slate-300"}`} />
-                            <span className={`text-xs ${acc.connected ? "text-emerald-600" : "text-slate-400"}`}>
-                              {acc.connected ? "Connected" : "Offline"}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <div className={`w-1.5 h-1.5 rounded-full ${acc.isActive ? "bg-indigo-500 animate-pulse" : "bg-slate-300"}`} />
-                            <span className={`text-xs ${acc.isActive ? "text-indigo-500" : "text-slate-400"}`}>
-                              {acc.isActive ? "Bot Aktif" : "Bot Mati"}
-                            </span>
+          {activePage === "settings" && (
+            <motion.div
+              key="settings"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 10 }}
+              transition={{ duration: 0.18 }}
+              className="max-w-5xl mx-auto p-7"
+            >
+              <div className="space-y-5 max-w-md">
+                <h1 className="text-xl font-bold text-slate-900">Pengaturan</h1>
+                {accounts.length === 0 ? (
+                  <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center">
+                    <p className="text-sm text-slate-400">Belum ada akun tersimpan.</p>
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden divide-y divide-slate-100">
+                    {accounts.map((acc) => (
+                      <button
+                        key={acc.accountId}
+                        onClick={() => navigate(`/account/${encodeURIComponent(acc.accountId)}`)}
+                        className="w-full flex items-center gap-3 px-5 py-4 hover:bg-slate-50 transition text-left"
+                      >
+                        <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center text-slate-600 font-bold text-sm shrink-0">
+                          {acc.accountId.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-slate-800 truncate">{acc.accountId}</p>
+                          <div className="flex items-center gap-2.5 mt-0.5 flex-wrap">
+                            <div className="flex items-center gap-1.5">
+                              <div className={`w-1.5 h-1.5 rounded-full ${acc.connected ? "bg-emerald-500" : "bg-slate-300"}`} />
+                              <span className={`text-xs ${acc.connected ? "text-emerald-600" : "text-slate-400"}`}>
+                                {acc.connected ? "Connected" : "Offline"}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <div className={`w-1.5 h-1.5 rounded-full ${acc.isActive ? "bg-indigo-500 animate-pulse" : "bg-slate-300"}`} />
+                              <span className={`text-xs ${acc.isActive ? "text-indigo-500" : "text-slate-400"}`}>
+                                {acc.isActive ? "Bot Aktif" : "Bot Mati"}
+                              </span>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      <span className="text-slate-300 text-sm">›</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+                        <span className="text-slate-300 text-sm">›</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
 
-        <footer className="max-w-5xl mx-auto px-7 pb-5 pt-2">
-          <p className="text-[11px] text-slate-400 text-center">
-            © {new Date().getFullYear()} raditdev
-          </p>
-        </footer>
+              <footer className="pt-10 pb-5">
+                <p className="text-[11px] text-slate-400 text-center">
+                  © {new Date().getFullYear()} raditdev
+                </p>
+              </footer>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
 
       {/* ── Add Account Modal ── */}
@@ -452,7 +493,6 @@ export default function App() {
               transition={{ duration: 0.18 }}
               className="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden"
             >
-              {/* Modal header */}
               <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100">
                 <div>
                   <h2 className="text-base font-bold text-slate-900">
@@ -466,22 +506,11 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-3">
                   <div className="flex gap-1.5">
-                    <div
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        step >= 1 ? "bg-indigo-500" : "bg-slate-200"
-                      }`}
-                    />
-                    <div
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        step >= 2 ? "bg-indigo-500" : "bg-slate-200"
-                      }`}
-                    />
+                    <div className={`w-1.5 h-1.5 rounded-full ${step >= 1 ? "bg-indigo-500" : "bg-slate-200"}`} />
+                    <div className={`w-1.5 h-1.5 rounded-full ${step >= 2 ? "bg-indigo-500" : "bg-slate-200"}`} />
                   </div>
                   <button
-                    onClick={() => {
-                      setShowAddForm(false);
-                      resetForm();
-                    }}
+                    onClick={() => { setShowAddForm(false); resetForm(); }}
                     className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
                   >
                     <X size={15} />
@@ -492,32 +521,12 @@ export default function App() {
               <div className="px-6 py-5 space-y-3">
                 {step === 1 ? (
                   <>
-                    <Field
-                      label="Account ID"
-                      value={accountId}
-                      onChange={setAccountId}
-                      placeholder="contoh: akun-1"
-                    />
+                    <Field label="Account ID" value={accountId} onChange={setAccountId} placeholder="contoh: akun-1" />
                     <div className="grid grid-cols-2 gap-3">
-                      <Field
-                        label="API ID"
-                        value={apiId}
-                        onChange={setApiId}
-                        placeholder="12345678"
-                      />
-                      <Field
-                        label="API Hash"
-                        value={apiHash}
-                        onChange={setApiHash}
-                        placeholder="a1b2c3d4..."
-                      />
+                      <Field label="API ID" value={apiId} onChange={setApiId} placeholder="12345678" />
+                      <Field label="API Hash" value={apiHash} onChange={setApiHash} placeholder="a1b2c3d4..." />
                     </div>
-                    <Field
-                      label="Nomor HP"
-                      value={phone}
-                      onChange={setPhone}
-                      placeholder="+62812345678"
-                    />
+                    <Field label="Nomor HP" value={phone} onChange={setPhone} placeholder="+62812345678" />
                     <p className="text-[11px] text-slate-400">
                       API ID & Hash bisa didapat dari{" "}
                       <span className="font-semibold text-slate-600">my.telegram.org</span>
@@ -539,16 +548,10 @@ export default function App() {
                   <>
                     <div className="px-3 py-2 bg-indigo-50 border border-indigo-100 rounded-lg">
                       <p className="text-xs text-indigo-600">
-                        Akun:{" "}
-                        <span className="font-bold text-indigo-800">{pendingAccountId}</span>
+                        Akun: <span className="font-bold text-indigo-800">{pendingAccountId}</span>
                       </p>
                     </div>
-                    <Field
-                      label="Kode OTP"
-                      value={code}
-                      onChange={setCode}
-                      placeholder="12345"
-                    />
+                    <Field label="Kode OTP" value={code} onChange={setCode} placeholder="12345" />
                     <Field
                       label="Password 2FA (kosongkan jika tidak ada)"
                       value={password}
@@ -582,7 +585,6 @@ export default function App() {
         )}
       </AnimatePresence>
     </div>
-    </>
   );
 }
 
@@ -635,30 +637,20 @@ function AccountCard({
           <p className="text-sm font-semibold text-slate-900 truncate">{account.accountId}</p>
           <div className="flex items-center gap-2.5 mt-0.5 flex-wrap">
             <div className="flex items-center gap-1.5">
-              <div
-                className={`w-1.5 h-1.5 rounded-full ${
-                  account.connected ? "bg-emerald-500" : "bg-slate-300"
-                }`}
-              />
+              <div className={`w-1.5 h-1.5 rounded-full ${account.connected ? "bg-emerald-500" : "bg-slate-300"}`} />
               <span className={`text-xs ${account.connected ? "text-emerald-600" : "text-slate-400"}`}>
                 {account.connected ? "Connected" : "Offline"}
               </span>
             </div>
             <div className="flex items-center gap-1.5">
-              <div
-                className={`w-1.5 h-1.5 rounded-full ${
-                  account.isActive ? "bg-indigo-500 animate-pulse" : "bg-slate-300"
-                }`}
-              />
+              <div className={`w-1.5 h-1.5 rounded-full ${account.isActive ? "bg-indigo-500 animate-pulse" : "bg-slate-300"}`} />
               <span className={`text-xs ${account.isActive ? "text-indigo-500" : "text-slate-400"}`}>
                 {account.isActive ? "Bot Aktif" : "Bot Mati"}
               </span>
             </div>
           </div>
         </div>
-        <span className="text-slate-300 group-hover:text-indigo-400 transition text-lg leading-none">
-          ›
-        </span>
+        <span className="text-slate-300 group-hover:text-indigo-400 transition text-lg leading-none">›</span>
       </div>
     </button>
   );
