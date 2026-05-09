@@ -197,11 +197,24 @@ const normalizeForKeyword = (value: string) =>
 const containsKeyword = (rawText: string, keyword: string) => {
   const k = (keyword || "").toLowerCase().trim();
   if (!k) return false;
-  if (rawText.includes(k)) return true;
+
+  const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // Exact word boundary match on raw text
+  try {
+    if (new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, "i").test(rawText)) return true;
+  } catch {}
+
+  // Word boundary match on normalized text (handles accents / special chars)
   const nt = normalizeForKeyword(rawText);
   const nk = normalizeForKeyword(k);
   if (!nk) return false;
-  return nt.includes(nk);
+  try {
+    const nEscaped = nk.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?<![a-z0-9])${nEscaped}(?![a-z0-9])`).test(nt);
+  } catch {}
+
+  return false;
 };
 
 const toIdVariants = (value: unknown): string[] => {
@@ -282,6 +295,7 @@ const matchesConfiguredTarget = (
 
 const responseQueueByAccount = new Map<string, { targetId: any; replyTo: number; message: string }[]>();
 const processingQueueAccounts = new Set<string>();
+const queuedReplySet = new Set<string>();
 
 const formatTargetId = (targetId: any) => {
   const channelId = targetId?.channelId ? String(targetId.channelId) : "";
@@ -328,6 +342,14 @@ const processQueue = async (accountId: string) => {
 };
 
 const addToQueue = (accountId: string, targetId: any, replyTo: number, message: string) => {
+  const replyKey = `${accountId}:${replyTo}:${message}`;
+  if (queuedReplySet.has(replyKey)) {
+    broadcastLog(`[${accountId}] [SKIP] Duplikat reply ke msg #${replyTo} diabaikan`, "info");
+    return;
+  }
+  queuedReplySet.add(replyKey);
+  if (queuedReplySet.size > 2000) queuedReplySet.clear();
+
   if (!responseQueueByAccount.has(accountId)) responseQueueByAccount.set(accountId, []);
   const queue = responseQueueByAccount.get(accountId)!;
   queue.push({ targetId, replyTo, message });
@@ -339,7 +361,6 @@ const addToQueue = (accountId: string, targetId: any, replyTo: number, message: 
 
 const processedMessageKeys = new Set<string>();
 const repliedThreadKeys = new Set<string>();
-const threadRootTextCache = new Map<string, string>();
 const pollCursorByTarget = new Map<string, number>();
 const pollingTimerByAccount = new Map<string, NodeJS.Timeout>();
 const pollingAccounts = new Set<string>();
@@ -374,7 +395,9 @@ const getDiscussionMsgId = async (
     if (!discussionMsgId) return null;
     // The discussion group is a non-broadcast chat in the chats list
     const discussionChat =
-      chats.find((c: any) => c.className !== "Channel") || chats[0] || null;
+      chats.find((c: any) => c.megagroup) ||
+      chats.find((c: any) => !c.broadcast) ||
+      chats[0] || null;
     return { discussionMsgId, discussionChat };
   } catch {
     return null;
@@ -397,32 +420,6 @@ const resolveDiscussionReplyTarget = async (
   return resolveReplyTarget(null, chat);
 };
 
-const getThreadRootText = async (
-  accountId: string,
-  tgClient: TelegramClient,
-  message: any,
-  chat: any,
-  threadTopId: number
-) => {
-  if (!threadTopId) return "";
-  const entityId = String(
-    (chat as any)?.id ||
-      (message as any)?.chatId ||
-      (message as any)?.peerId?.channelId ||
-      "unknown"
-  );
-  const cacheKey = `${accountId}:${entityId}:${threadTopId}`;
-  if (threadRootTextCache.has(cacheKey)) return threadRootTextCache.get(cacheKey)!;
-  try {
-    const target = await resolveReplyTarget(message, chat);
-    const rootMsg: any = await tgClient.getMessages(target, { ids: [threadTopId] });
-    const text = String((rootMsg as any)?.message || "").trim();
-    threadRootTextCache.set(cacheKey, text);
-    return text;
-  } catch {
-    return "";
-  }
-};
 
 const handleIncomingMessage = async (
   accountId: string,
@@ -499,28 +496,12 @@ const handleIncomingMessage = async (
     return;
   }
 
-  const rootText = await getThreadRootText(accountId, tgClient, message, chat, threadTopId);
-  const msgText = `${rawText} ${rootText}`.trim().toLowerCase();
+  const msgText = rawText.toLowerCase();
   const normalizedMsgText = normalizeForKeyword(rawText);
 
   const match = settings.responses.find((r) => containsKeyword(msgText, r.keyword));
-  const hasCustomRules = settings.responses.length > 0;
 
-  const quickKeywords = [
-    "wtb", "nokos", "jaspink", "convert", "jual", "beli",
-    "robux", "roblox", "hmu", "hit me up", "seller",
-    "butuh", "need", "via login", "vilog",
-  ];
-  const hasQuickKeyword = quickKeywords.some((k) => containsKeyword(msgText, k));
-
-  if (hasCustomRules && !match) {
-    broadcastLog(
-      `[${accountId}] [SKIP] Tidak ada rule cocok: "${normalizedMsgText.slice(0, 120)}"`,
-      "info"
-    );
-    return;
-  }
-  if (!hasCustomRules && !hasQuickKeyword) {
+  if (!match) {
     broadcastLog(
       `[${accountId}] [SKIP] Tidak ada keyword cocok: "${normalizedMsgText.slice(0, 120)}"`,
       "info"
@@ -528,8 +509,7 @@ const handleIncomingMessage = async (
     return;
   }
 
-  const detectedKeyword =
-    match?.keyword || quickKeywords.find((k) => containsKeyword(msgText, k)) || "";
+  const detectedKeyword = match.keyword;
 
   // Use the same canonical IDs as dedupeKey so event-path and poll-path
   // for the same channel post share one threadKey and only one reply is sent.
@@ -544,9 +524,7 @@ const handleIncomingMessage = async (
     "bot"
   );
 
-  const finalResponse =
-    match?.response ||
-    `Halo kak, aku ready ${detectedKeyword || "jasa ini"}. DM ya.`;
+  const finalResponse = match.response;
 
   try {
     let effectiveChat = chat;
